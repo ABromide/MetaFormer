@@ -7,6 +7,7 @@
 
 import os
 import torch
+import torch.utils.data.dataloader
 import numpy as np
 import torch.distributed as dist
 from torchvision import datasets, transforms
@@ -20,12 +21,12 @@ from .samplers import SubsetRandomSampler
 from .dataset_fg import DatasetMeta
 def build_loader(config):
     config.defrost()
+    
     dataset_train, config.MODEL.NUM_CLASSES = build_dataset(is_train=True, config=config)
     config.freeze()
     print(f"local rank {config.LOCAL_RANK} / global rank {dist.get_rank()} successfully build train dataset")
     dataset_val, _ = build_dataset(is_train=False, config=config)
     print(f"local rank {config.LOCAL_RANK} / global rank {dist.get_rank()} successfully build val dataset")
-
     num_tasks = dist.get_world_size()
     global_rank = dist.get_rank()
     if config.DATA.ZIP_MODE and config.DATA.CACHE_MODE == 'part':
@@ -44,7 +45,7 @@ def build_loader(config):
         batch_size=config.DATA.BATCH_SIZE,
         num_workers=config.DATA.NUM_WORKERS,
         pin_memory=config.DATA.PIN_MEMORY,
-        drop_last=True,
+        drop_last=True
     )
 
     data_loader_val = torch.utils.data.DataLoader(
@@ -123,6 +124,11 @@ def build_dataset(is_train, config):
         root = './datasets/aircraft'
         dataset = DatasetMeta(root=root,transform=transform,train=is_train,aux_info=config.DATA.ADD_META,dataset=config.DATA.DATASET)
         nb_classes = 100
+    elif config.DATA.DATASET=="medical":
+        root="datasets/medical"
+        dataset=DatasetMeta(root,transform=transform,dataset=config.DATA.DATASET,train=is_train)
+        nb_classes=2
+
     else:
         raise NotImplementedError("We only support ImageNet and inaturelist.")
 

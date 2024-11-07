@@ -225,7 +225,7 @@ class MetaFG_Meta(nn.Module):
                 cur_mask_prob = self.mask_prob
             if cur_mask_prob != 0 and self.training:
                 mask = torch.ones_like(meta)
-                mask_index = torch.randperm(meta.size(0))[:int(meta.size(0)*cur_mask_prob)]
+                mask_index = torch.randperm(meta.size(0),device=mask.device)[:int(meta.size(0)*cur_mask_prob)]
                 mask[mask_index] = 0
                 meta = mask * meta
         x = self.forward_features(x,meta)
@@ -262,7 +262,7 @@ def MetaFG_meta_2(pretrained=False, **kwargs):
 if __name__ == "__main__":
     x = torch.randn([2, 3, 224, 224])
     meta = torch.randn([2,7])
-    model = MetaFG_meta()
+    model = MetaFG_Meta()
     import ipdb;ipdb.set_trace()
     output = model(x,meta)
     print(output.shape)

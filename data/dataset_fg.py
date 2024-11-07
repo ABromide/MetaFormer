@@ -1,5 +1,7 @@
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Union,Optional
 import torch.utils.data as data
-
+import cv2
 import os
 import re
 import csv
@@ -96,6 +98,106 @@ def load_file(root,dataset):
             id2label[int(categorie['id'])] = name.strip().lower()
     
     return train_class_info,train_id2meta,val_class_info,val_id2meta,class_to_idx,id2label
+@dataclass
+class MedicalMetaFeature:
+    pid:str=""
+    diagnosis:str=""
+    id_:str=""
+    name:str=""
+    gender:str=""
+    age:int=99
+    t_spot:int=1
+    tb_ab_igg:int=1
+    tb_ab_igm:int=1
+    pdd:int=1
+    abdominal_pain:int=1
+    diarrhea:int=1
+    rectum:int=1
+    terminal_ileum:int=1
+    ileocecus:int=1
+    other:int=1
+def convert_meta_to_tensor(meta:MedicalMetaFeature)->Tuple[torch.Tensor]:
+    res=[]
+    index=2
+    keys=list(meta.__dict__.keys())
+    keys.sort()
+    if meta.gender=="男":
+        res.append(0)
+    else:
+        res.append(1)
+    for attr in keys:
+        if attr in["pid","diagnosis","id_","name","gender","age"]:
+            continue
+        else:
+            res.append(index+getattr(meta,attr)+1)
+            index+=3
+        res.append(index+getattr(meta,attr)+1)
+        index+=3
+    res.append(meta.age+index)
+    return torch.tensor(res,dtype=torch.long)
+@dataclass
+class MedicalInputFeature:
+    id_:str
+    A_img_path:str#回肠末端图片路径
+    B_img_path:str #回盲部图片路径
+    c_img_path:str #其他
+    meta:MedicalMetaFeature=field(default_factory=MedicalMetaFeature)
+
+def load_medical_info(info:List[Union[int,str]]):
+    res=MedicalMetaFeature()
+    attrs=list(res.__dict__.keys())
+    for attr , value in zip(attrs,info):
+        setattr(res,attr,type(getattr(res,attr))(value))
+    return res
+
+select_num_str_position:int=random.randint(2,17)
+def chack_if_example_for_train(name:str)->bool:
+    global select_num_str_position
+    num_str=str(hash(name))
+    key_num=int(num_str[select_num_str_position])
+    if key_num>=2:
+        return False
+    return True
+hash2inputfeature:Dict[int,MedicalInputFeature]={}
+def find_images_and_targets_medical(root,dataset,istrain=False,aux_info=False):
+    meta_path=os.path.join(root,"meta.csv")
+    meta_infos:Dict[str,MedicalMetaFeature]={}
+    with open(meta_path,"r") as f:
+        f.readline()
+        for line in f:
+            info=(load_medical_info(line.strip().split(",")))
+            meta_infos[info.id_]=info
+    img_folder=None
+    if istrain:
+        img_folder=os.path.join(root,"train")
+    else:
+        img_folder=os.path.join(root,"test")
+    folders=os.listdir(img_folder)
+    all_data:List[MedicalInputFeature]=[]
+    global hash2inputfeature
+    for folder in folders:
+        if folder not in meta_infos:
+            continue
+        meta=meta_infos[folder]
+        real_folder=os.path.join(img_folder,folder)
+        imgs=os.listdir(real_folder)
+        A_img_path=""
+        B_img_path=""
+        C_img_path=""
+        for img in imgs:
+            if "A" in img:
+                A_img_path=os.path.join(real_folder,img)
+            elif "B" in img:
+                B_img_path=os.path.join(real_folder,img)
+            else:
+                C_img_path=os.path.join(real_folder,img)
+        all_data.append(MedicalInputFeature(
+            id_=folder,A_img_path=A_img_path,B_img_path=B_img_path,c_img_path=C_img_path,
+            meta=meta
+        ))
+        hash2inputfeature[hash(folder)]=all_data[-1]
+    return all_data
+
 def find_images_and_targets_cub200(root,dataset,istrain=False,aux_info=False):
     imageid2label = {}
     with open(os.path.join(os.path.join(root,'CUB_200_2011'),'image_class_labels.txt'),'r') as f:
@@ -335,6 +437,9 @@ def find_images_and_targets_2017_2018(root,dataset,istrain=False,aux_info=False)
         else:
             images_and_targets.append((file_path,target))
     return images_and_targets,class_to_idx,images_info
+
+
+
 def find_images_and_targets(root,istrain=False,aux_info=False):
     if os.path.exists(os.path.join(root,'train.json')):
         with open(os.path.join(root,'train.json'),'r') as f:
@@ -380,7 +485,33 @@ def find_images_and_targets(root,istrain=False,aux_info=False):
             images_and_targets.append((file_path,target))
     return images_and_targets,class_to_idx,images_info
 
-
+def adjust_img(img):
+    cv_img=cv2.cvtColor(np.array(img),cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+    _, threshold = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(threshold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    max_contour = max(contours, key=cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(max_contour)
+    cv_img_res = cv_img[y:y+h, x:x+w]
+    return Image.fromarray(cv2.cvtColor(cv_img_res, cv2.COLOR_BGR2RGB))
+def rotate_img(img,degree:Optional[int]):
+    if degree is None:
+        return img
+    cv_img=cv2.cvtColor(np.array(img),cv2.COLOR_RGB2BGR)
+    cv_img_res=cv2.rotate(cv_img,degree)
+    return Image.fromarray(cv2.cvtColor(cv_img_res, cv2.COLOR_BGR2RGB))
+def random_rotate(img):
+    flag=random.random()
+    degree=None
+    if flag<0.25:
+        pass
+    elif flag<0.5:
+        degree=cv2.ROTATE_90_CLOCKWISE
+    elif flag<0.75:
+        degree=cv2.ROTATE_180
+    else:
+        degree=cv2.ROTATE_90_COUNTERCLOCKWISE
+    return rotate_img(img,degree)
 class DatasetMeta(data.Dataset):
     def __init__(
             self,
@@ -394,6 +525,7 @@ class DatasetMeta(data.Dataset):
             per_sample=1.0):
         self.aux_info = aux_info
         self.dataset = dataset
+        medical_data=None
         if dataset in ['inaturelist2021','inaturelist2021_mini']:
             images, class_to_idx,images_info = find_images_and_targets(root,train,aux_info)
         elif dataset in ['inaturelist2017','inaturelist2018']:
@@ -410,9 +542,12 @@ class DatasetMeta(data.Dataset):
             images,class_to_idx,images_info = find_images_and_targets_nabirds(root,dataset,train)
         elif dataset == 'aircraft':
             images,class_to_idx,images_info = find_images_and_targets_aircraft(root,dataset,train)
-        if len(images) == 0:
-            raise RuntimeError(f'Found 0 images in subfolders of {root}. '
-                               f'Supported image extensions are {", ".join(IMG_EXTENSIONS)}')
+        elif dataset == 'medical':
+            images=find_images_and_targets_medical(root,dataset,train)
+            class_to_idx,images_info=None,None
+        # if len(images) == 0:
+        #     raise RuntimeError(f'Found 0 images in subfolders of {root}. '
+        #                        f'Supported image extensions are {", ".join(IMG_EXTENSIONS)}')
         self.root = root
         self.samples = images
         self.imgs = self.samples  # torchvision ImageFolder compat
@@ -420,9 +555,59 @@ class DatasetMeta(data.Dataset):
         self.images_info = images_info
         self.load_bytes = load_bytes
         self.transform = transform
-        
+        self.is_train=train
+        # self.medical_data:List[MedicalInputFeature]=medical_data
 
-    def __getitem__(self, index):
+    def __getitem__(self, index:int):
+        if self.dataset=="medical":
+            selected=self.imgs[index]
+            img1=None
+            img2=None
+            img3=None
+            dummy_img=None
+            weight=torch.tensor([0.0,0.0,0.0],dtype=torch.float)
+            actual_imgs=0
+            
+            if len(selected.A_img_path)>0:
+                weight[0]=1.0
+                img1=Image.open(selected.A_img_path).convert("RGB")
+                img1=adjust_img(img1)
+                if self.is_train:
+                    img1=random_rotate(img1)
+                dummy_img=img1
+                actual_imgs+=1
+            if len(selected.B_img_path)>0:
+                weight[1]=1.0
+                img2=Image.open(selected.B_img_path).convert("RGB")
+                img2=adjust_img(img2)
+                if self.is_train:
+                    img2=random_rotate(img2)
+                dummy_img=img2
+                actual_imgs+=1
+            if len(selected.c_img_path)>0:
+                weight[2]=1.0
+                img3=Image.open(selected.c_img_path).convert("RGB")
+                img3=adjust_img(img3)
+                if self.is_train:
+                    img3=random_rotate(img3)
+                dummy_img=img3
+                actual_imgs+=1
+            if img1 is None:
+                img1=dummy_img
+            if img2 is None:
+                img2=dummy_img
+            if img3 is None:
+                img3=dummy_img
+            img1=self.transform(img1)
+            img2=self.transform(img2)
+            img3=self.transform(img3)
+            meta=convert_meta_to_tensor(selected.meta)
+            target=0 if selected.meta.diagnosis=="CD" else 1
+            weight=weight*(1.0/actual_imgs)
+       
+            # weight=weight.reshape([1,-1])
+            return img1,img2,img3,weight,meta,target,hash(selected.id_)
+
         if self.aux_info:
             path, target,aux_info = self.samples[index]
         else:
@@ -454,4 +639,3 @@ if __name__ == '__main__':
     import ipdb;ipdb.set_trace()
 #     find_images_and_targets_2017('')
     
-

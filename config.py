@@ -63,7 +63,7 @@ _C.MODEL.NAME = ''
 # Checkpoint to resume, could be overwritten by command line argument
 _C.MODEL.RESUME = ''
 # Number of classes, overwritten in data preparation
-_C.MODEL.NUM_CLASSES = 1000
+_C.MODEL.NUM_CLASSES = 2
 # Dropout rate
 _C.MODEL.DROP_RATE = 0.0
 # Drop path rate
@@ -170,7 +170,7 @@ _C.SAVE_FREQ = 1
 # Frequency to logging info
 _C.PRINT_FREQ = 10
 # Fixed random seed
-_C.SEED = 0
+_C.SEED = 9999 # 0 3407 7043
 # Perform evaluation only, overwritten by command line argument
 _C.EVAL_MODE = False
 # Test throughput only, overwritten by command line argument

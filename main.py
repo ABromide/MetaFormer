@@ -1,4 +1,10 @@
+import json
 import os
+import functools
+from models.ensemble_model import EnsembleModel
+os.environ["CUDA_VISIBLE_DEVICES"]="3"
+import warnings
+warnings.filterwarnings("ignore")
 import time
 import argparse
 import datetime
@@ -10,7 +16,12 @@ import torch.distributed as dist
 
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from timm.utils import accuracy, AverageMeter
-
+import random
+SEED=3407 #3407
+random.seed(SEED)
+torch.manual_seed(SEED)
+np.random.seed(SEED)
+from models.baseline import BaselineModel
 from config import get_config
 from models import build_model
 from data import build_loader
@@ -18,7 +29,8 @@ from lr_scheduler import build_scheduler
 from optimizer import build_optimizer
 from logger import create_logger
 from utils import load_checkpoint, save_checkpoint, get_grad_norm, auto_resume_helper, reduce_tensor,load_pretained
-from torch.utils.tensorboard import SummaryWriter
+from data.dataset_fg import hash2inputfeature
+# from torch.utils.tensorboard import SummaryWriter
 try:
     # noinspection PyUnresolvedReferences
     from apex import amp
@@ -44,7 +56,7 @@ def parse_option():
                         help='no: no cache, '
                              'full: cache all data, '
                              'part: sharding the dataset into nonoverlapping pieces and only cache one piece')
-    parser.add_argument('--resume', help='resume from checkpoint')
+    parser.add_argument('--resume',default=False, help='resume from checkpoint')
     parser.add_argument('--accumulation-steps', type=int, help="gradient accumulation steps")
     parser.add_argument('--use-checkpoint', action='store_true',
                         help="whether to use gradient checkpointing to save memory")
@@ -97,7 +109,12 @@ def parse_option():
 def main(config):
     dataset_train, dataset_val, data_loader_train, data_loader_val, mixup_fn = build_loader(config)
     logger.info(f"Creating model:{config.MODEL.TYPE}/{config.MODEL.NAME}")
-    model = build_model(config)
+    model = None
+    if config.DATA.DATASET=="medical":
+        # model=BaselineModel(model)
+        model=EnsembleModel(functools.partial(build_model,config))
+    else:
+        model=build_model(config)
     model.cuda()
     logger.info(str(model))
 
@@ -112,13 +129,13 @@ def main(config):
         flops = model_without_ddp.flops()
         logger.info(f"number of GFLOPs: {flops / 1e9}")
     lr_scheduler = build_scheduler(config, optimizer, len(data_loader_train))
-    if config.AUG.MIXUP > 0.:
-        # smoothing is handled with mixup label transform
-        criterion = SoftTargetCrossEntropy()
-    elif config.MODEL.LABEL_SMOOTHING > 0.:
-        criterion = LabelSmoothingCrossEntropy(smoothing=config.MODEL.LABEL_SMOOTHING)
-    else:
-        criterion = torch.nn.CrossEntropyLoss()
+    # if config.AUG.MIXUP > 0.:
+    #     # smoothing is handled with mixup label transform
+    #     criterion = SoftTargetCrossEntropy()
+    # elif config.MODEL.LABEL_SMOOTHING > 0.:
+    #     criterion = LabelSmoothingCrossEntropy(smoothing=config.MODEL.LABEL_SMOOTHING)
+    # else:
+    criterion = torch.nn.CrossEntropyLoss()
 
     max_accuracy = 0.0
     if config.MODEL.PRETRAINED:
@@ -145,10 +162,10 @@ def main(config):
         max_accuracy = load_checkpoint(config, model_without_ddp, optimizer, lr_scheduler, logger)
         acc1, acc5, loss = validate(config, data_loader_val, model)
         logger.info(f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%")
-        if config.DATA.ADD_META:
-            logger.info(f"**********mask meta test***********")
-            acc1, acc5, loss = validate(config, data_loader_val, model,mask_meta=True)
-            logger.info(f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%")
+        # if config.DATA.ADD_META:
+        #     logger.info(f"**********mask meta test***********")
+        #     acc1, acc5, loss = validate(config, data_loader_val, model,mask_meta=True)
+        #     logger.info(f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%")
         if config.EVAL_MODE:
             return
 
@@ -169,10 +186,10 @@ def main(config):
         logger.info(f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%")
         max_accuracy = max(max_accuracy, acc1)
         logger.info(f'Max accuracy: {max_accuracy:.2f}%')
-        if config.DATA.ADD_META:
-            logger.info(f"**********mask meta test***********")
-            acc1, acc5, loss = validate(config, data_loader_val, model,mask_meta=True)
-            logger.info(f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%")
+        # if config.DATA.ADD_META:
+        #     logger.info(f"**********mask meta test***********")
+        #     acc1, acc5, loss = validate(config, data_loader_val, model,mask_meta=True)
+        #     logger.info(f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%")
 #         data_loader_train.terminate()
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -192,24 +209,37 @@ def train_one_epoch_local_data(config, model, criterion, data_loader, optimizer,
     start = time.time()
     end = time.time()
     for idx, data in enumerate(data_loader):
-        if config.DATA.ADD_META:
-            samples, targets,meta = data
-            meta = [m.float() for m in meta]
-            meta = torch.stack(meta,dim=0)
-            meta = meta.cuda(non_blocking=True)
+        if config.DATA.DATASET == 'medical':
+            # img1,img2,meta,targets=data
+            # targets=targets.cuda(non_blocking=True).unsqueeze(1)
+            # img1,img2=img1.cuda(non_blocking=True),img2.cuda(non_blocking=True)
+            # meta=meta.cuda(non_blocking=True)
+            # outputs=model(img1,img2,meta)
+            img1,img2,img3,weight,meta,targets,id_hash=data
+            targets=targets.cuda(non_blocking=True)
+            img1,img2,img3=img1.cuda(non_blocking=True),img2.cuda(non_blocking=True),img3.cuda(non_blocking=True)
+            weight=weight.cuda(non_blocking=True)
+            meta=meta.cuda(non_blocking=True)
+            outputs=model(img1,img2,img3,meta,weight)
         else:
-            samples, targets= data
-            meta = None
+            if config.DATA.ADD_META:
+                samples, targets,meta = data
+                meta = [m.float() for m in meta]
+                meta = torch.stack(meta,dim=0)
+                meta = meta.cuda(non_blocking=True)
+            else:
+                samples, targets= data
+                meta = None
 
-        samples = samples.cuda(non_blocking=True)
-        targets = targets.cuda(non_blocking=True)
+            samples = samples.cuda(non_blocking=True)
+            targets = targets.cuda(non_blocking=True)
 
-        if mixup_fn is not None:
-            samples, targets = mixup_fn(samples, targets)
-        if config.DATA.ADD_META:
-            outputs = model(samples,meta)
-        else:
-            outputs = model(samples)
+            if mixup_fn is not None:
+                samples, targets = mixup_fn(samples, targets)
+            if config.DATA.ADD_META:
+                outputs = model(samples,meta)
+            else:
+                outputs = model(samples)
 
         if config.TRAIN.ACCUMULATION_STEPS > 1:
             loss = criterion(outputs, targets)
@@ -272,9 +302,12 @@ def train_one_epoch_local_data(config, model, criterion, data_loader, optimizer,
     logger.info(f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
 @torch.no_grad()
 def validate(config, data_loader, model, mask_meta=False):
+    global hash2inputfeature
     criterion = torch.nn.CrossEntropyLoss()
     model.eval()
-
+    results={}
+    for value in hash2inputfeature.values():
+        results[value.id_]={"label":value.meta.diagnosis,"pred":""}
     batch_time = AverageMeter()
     loss_meter = AverageMeter()
     acc1_meter = AverageMeter()
@@ -282,37 +315,59 @@ def validate(config, data_loader, model, mask_meta=False):
 
     end = time.time()
     for idx, data in enumerate(data_loader):
-        if config.DATA.ADD_META:
-            images,target,meta = data
-            meta = [m.float() for m in meta]
-            meta = torch.stack(meta,dim=0)
-            if mask_meta:
-                meta = torch.zeros_like(meta)
-            meta = meta.cuda(non_blocking=True)
+        if config.DATA.DATASET == 'medical':
+            # img1,img2,meta,target=data
+            # target=target.cuda(non_blocking=True)
+            # img1,img2=img1.cuda(non_blocking=True),img2.cuda(non_blocking=True)
+            # meta=meta.cuda(non_blocking=True)
+            # output=model(img1,img2,meta)
+            img1,img2,img3,weight,meta,targets,id_hash=data
+            targets=targets.cuda(non_blocking=True)
+            # targets=targets.unsqueeze(1)
+            img1,img2,img3=img1.cuda(non_blocking=True),img2.cuda(non_blocking=True),img3.cuda(non_blocking=True)
+            weight=weight.cuda(non_blocking=True)
+            meta=meta.cuda(non_blocking=True)
+            outputs=model(img1,img2,img3,meta,weight)
+            preds=torch.argmax(outputs,1).cpu().tolist()
+            id_hash=id_hash.tolist()
+            for hash_,pred in zip(id_hash,preds):
+                results[hash2inputfeature[hash_].id_]["pred"]=("CD" if pred==0 else "ITB")
+            
         else:
-            images, target = data
-            meta = None
-        
-        images = images.cuda(non_blocking=True)
-        target = target.cuda(non_blocking=True)
+            if config.DATA.ADD_META:
+                images,targets,meta = data
+                meta = [m.float() for m in meta]
+                meta = torch.stack(meta,dim=0)
+                if mask_meta:
+                    meta = torch.zeros_like(meta)
+                meta = meta.cuda(non_blocking=True)
+            else:
+                images, targets = data
+                meta = None
+            
+            images = images.cuda(non_blocking=True)
+            targets = targets.cuda(non_blocking=True)
 
-        # compute output
-        if config.DATA.ADD_META:
-            output = model(images,meta)
-        else:
-            output = model(images)
+            # compute output
+            if config.DATA.ADD_META:
+                outputs = model(images,meta)
+            else:
+                outputs = model(images)
 
         # measure accuracy and record loss
-        loss = criterion(output, target)
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        loss = criterion(outputs, targets)
+        if config.DATA.DATASET=="medical":
+            acc1, acc5 = accuracy(outputs, targets, topk=(1, 2))
+        else:
+            acc1, acc5 = accuracy(outputs, targets, topk=(1, 5))
 
         acc1 = reduce_tensor(acc1)
         acc5 = reduce_tensor(acc5)
         loss = reduce_tensor(loss)
 
-        loss_meter.update(loss.item(), target.size(0))
-        acc1_meter.update(acc1.item(), target.size(0))
-        acc5_meter.update(acc5.item(), target.size(0))
+        loss_meter.update(loss.item(), targets.size(0))
+        acc1_meter.update(acc1.item(), targets.size(0))
+        acc5_meter.update(acc5.item(), targets.size(0))
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -328,6 +383,14 @@ def validate(config, data_loader, model, mask_meta=False):
                 f'Acc@5 {acc5_meter.val:.3f} ({acc5_meter.avg:.3f})\t'
                 f'Mem {memory_used:.0f}MB')
     logger.info(f' * Acc@1 {acc1_meter.avg:.3f} Acc@5 {acc5_meter.avg:.3f}')
+    
+    keys=list(results.keys())
+    for key in keys:
+        if len(results[key]["pred"])==0:
+            results.pop(key)
+    with open("eval_result.json","w") as f:
+        json.dump(results,f,ensure_ascii=False,indent=4)
+    
     return acc1_meter.avg, acc5_meter.avg, loss_meter.avg
 
 
@@ -368,9 +431,8 @@ if __name__ == '__main__':
     torch.distributed.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=rank)
     torch.distributed.barrier()
 
-    seed = config.SEED + dist.get_rank()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    # seed = config.SEED + dist.get_rank()
+    
     cudnn.benchmark = True
 
     # linear scale the learning rate according to total batch size, may not be optimal
